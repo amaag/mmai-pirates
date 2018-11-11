@@ -6,7 +6,8 @@ from joueur.base_ai import BaseAI
 # you can add additional import(s) here
 # <<-- /Creer-Merge: imports -->>
 
-
+def bestof(candidates, valuation_func, filter_func = lambda x:True):
+    return(max(filter(filter_func, candidates),key=valuation_func))
 
 
 class RoleBase():
@@ -106,6 +107,7 @@ class GoldRunnerRole(RoleBase):
 
 
     def fitness(AI, unit):
+        # print("GoldRunnerRole.fitness called for unit: {}".format(unit))
         if(unit.gold == 0):
             return 0
             
@@ -158,6 +160,8 @@ class ShipKillerRole(RoleBase):
 
 
     def fitness(AI, unit):
+
+        # print("ShipKillerRole.fitness called for unit: {}".format(unit))
         
         # unit is dead
         if(unit.tile is None):
@@ -168,9 +172,8 @@ class ShipKillerRole(RoleBase):
             return 0
             
         # no target available
-        if(ShipKillerRole.get_best_target_for_unit(AI, unit) is None):
-            return 0
-            
+        return(ShipKillerRole.get_best_target_for_unit(AI, unit)[1])
+
             
         return 1
         
@@ -182,13 +185,25 @@ class ShipKillerRole(RoleBase):
     
     
     def execute(self):
+        print("ShipKillerRole.execute: {}".format(self))
         unit = self.get_unit()
         target = self.AI.game.get_game_object(self.target_id)
         self.turn_count += 1
 
+        # if we have no target, claim one
         if(target is None):
-            target = self.get_best_target()
-            self.target(target)
+            target, target_fitness = self.get_best_target()
+            if(target_fitness > 0):
+                print("ShipKillerRole.execute: found new target {} with fitness {}".format(target, target_fitness))
+                self.target(target)
+            else:
+                # No targets available: abandon role
+                return True
+
+        # if the target is no longer suitable, abandon it
+        if(ShipKillerRole.target_fitness(self.AI, unit, target) == 0):
+            self.untarget()
+            return True
 
         if(target is not None):
     
@@ -223,6 +238,7 @@ class ShipKillerRole(RoleBase):
 
     def get_best_target_for_unit(AI, unit):
                                     # Look for a merchant ship
+        # print("ShipKillerRole.get_best_target_for_unit: {}".format(unit))
         merchant = None
         max_fitness = 0
         for target in AI.game.units:
@@ -231,25 +247,39 @@ class ShipKillerRole(RoleBase):
                 max_fitness = fitness
                 merchant = target
 
-        return(merchant)
+        # print("ShipKillerRole.get_best_target_for_unit: returning {}, {}".format(merchant, max_fitness))
+        return(merchant, max_fitness)
         
     def target_fitness(AI, unit, target):
         # calculate distance func
         # calculate penalty for being otherwise targeted
         # calculate weighting for owner (i.e. player vs. merchant)
 
-        if(
-            ((target.target_port is None) and (target.owner != AI.player.opponent)) or
-            (target.ship_health == 0) or
-            (target.tile is None)
-        ):
-            return 0
+        # print("   Evaluating {} as a target for {}".format(target.id, unit.id))
+        # print("      target_port = {}".format(target.target_port))
+        # print("      ship_health = {}".format(target.ship_health))
+        # print("      target.tile = {}".format(target.tile))
 
+        if((target.tile is None) or (target.ship_health == 0)):
+            return(0)
 
+        if(target.target_port is not None):
+            ownerWeight = 1.0
             
-        targetWeight = ShipKillerRole.shipTargets.get(target.id, 0)
+        elif(target.owner == AI.player.opponent):
+            ownerWeight = 0.8
+            
+        else:
+            ownerWeight = 0
 
-        return 1/(1+abs(targetWeight - 1))
+        targetWeight = ShipKillerRole.shipTargets.get(target.id, 0)
+        # print("      targetWeight = {}".format(targetWeight))
+
+        fitness =  ownerWeight/(1+abs(targetWeight - 1))
+        # print("      fitness = {}".format(fitness))
+        
+        return(fitness)
+
 
 
     def target(self, target):
@@ -263,11 +293,13 @@ class ShipKillerRole(RoleBase):
             ShipKillerRole.shipTargets[target.id] = ShipKillerRole.shipTargets.get(target.id, 0) + 1
             target.log("ID: {}".format(target.id))
             self.target_id = target.id
+            # print("TARGET for {} assigned to {}".format(self.unit_id, self.target_id))
     
     def untarget(self):
         if(self.target_id is not None):
             ShipKillerRole.shipTargets[self.target_id] = ShipKillerRole.shipTargets.get(self.target_id, 1) - 1
             self.target_id = None
+            # print("TARGET for {} assigned to NONE".format(self.unit_id))
         
 
 
@@ -331,53 +363,107 @@ class AI(BaseAI):
         if(self.last_turn != self.game.current_turn):
             self.last_turn = self.game.current_turn
             self.phase = 0
+            print("=====================================================================")
 
         if(self.phase == 0):
+
+            print('--- TURN {} PHASE {} ------------------------'.format(self.game.current_turn, self.phase))
+
+            print('[BUILDING]')
+
+            if((self.player.port.tile.unit is not None) and (self.player.port.tile.unit.ship_health > 0)):
+
+                print("CLEARING THE PORT")
+                path = self.find_path(self.player.port.tile, self.player.opponent.port.tile, self.player.port.tile.unit)
+                
+                if(len(path) > 0):
+                    print("MOVING NEW SHIP TO {}, {}".format(path[0].x, path[0].y))
+                    self.player.port.tile.unit.move(path[0])
+                    
+
+
+
+
+            # print("TRYING TO BUILD A CREW WITH {}:{}/{} gold".format(self.player.port.gold, self.player.gold, self.game.crew_cost))
+            if(
+                (self.player.port.tile.unit is None) and
+                (self.player.gold >= self.game.crew_cost) and
+                (self.player.port.gold >= self.game.crew_cost)
+            ):
+                self.player.port.spawn("crew")
+                print("BUILDING A CREW")
+        
+            # print("TRYING TO BUILD A SHIP WITH {}:{}/{} gold".format(self.player.port.gold, self.player.gold, self.game.ship_cost))
+            while(
+                (self.player.gold >= self.game.ship_cost) and
+                (self.player.port.gold >= self.game.ship_cost) and
+                (self.player.port.spawn("ship"))
+            ):
+                print("BUILDING A SHIP")
+
+    
+            self.alive_units = list(filter(lambda x: x.tile is not None, self.player.units))
+
+
+            # copy only goals for living units             
+            old_goals = self.goals
+            self.goals = dict()
+
+            for unit in self.alive_units:
+                self.goals[unit.id] = old_goals.get(unit.id, None)
+                
+
+
+            print("ALIVE_UNITS: {}".format(self.alive_units))
+
+
+            self.phase += 1            
+
+            return(False)
+
+
+        if(self.phase == 1):
+            
+            print('--- TURN {} PHASE {} ------------------------'.format(self.game.current_turn, self.phase))
 
             for goal_id in self.goals:
                 print("GOAL[{}]: {}".format(goal_id, self.goals[goal_id]))
                 
+            
+            Roles = [GoldRunnerRole, ShipKillerRole]
                 
-            for unit in self.player.units:
+            available_units = list(filter(lambda x: (self.goals.get(x.id, None) is None), self.alive_units))
                 
-    
-                if(
-                    (unit.id not in self.goals) or
-                    (self.goals[unit.id] is None)
-                ):
-                    # goals[unit.id] = None
+            print("AVAILABLE_UNITS: {}".format(available_units))
+                
+            for unit in available_units:
 
-                    # CLAIMING FOR goldrunner
-    
-                    # if(unit.gold > 0):
-                    #     goals[unit.id] = "goldrunner"
-    
-    
-                    # CLAIMING FOR shipkiller
-    
-                    # else:
-                    
-                    if(GoldRunnerRole.fitness(self, unit) > 0):
-                        print("CLAIMING: {} for GoldRunnerRole".format(unit.id))
-                        self.goals[unit.id] = GoldRunnerRole(self, unit)
-                    
-                    if(ShipKillerRole.fitness(self, unit) > 0):
-                        print("CLAIMING: {} for ShipKillerRole".format(unit.id))
-                        self.goals[unit.id] = ShipKillerRole(self, unit)
+                print("ROLE MATRIX FOR UNIT {}: {}".format(unit.id, list(map(lambda role: role.fitness(self, unit), Roles))))
+                best_role = max(Roles, key=lambda role: role.fitness(self, unit))
 
+                print("assigning {} to unit {}".format(best_role, unit.id))
+                self.goals[unit.id] = best_role(self, unit)
 
 
             self.phase += 1            
+
             return(False)
         
-        elif(self.phase == 1):
+        elif(self.phase == 2):
+
+            print('--- TURN {} PHASE {} ------------------------'.format(self.game.current_turn, self.phase))
 
             for unit in self.player.units:
                 
                 goal = self.goals.get(unit.id, None)
     
+                if(goal is None):
+                    print("GOAL IS NONE")
+
+                if(unit is None):
+                    print("UNIT IS NONE")
+                    
                 unit.log(
-                    "MINE" + 
                     "goal: {}\n".format(goal) +
                     # "acted: {}\n".format(unit.acted) +
                     "crew: {}\n".format(unit.crew) +
@@ -386,7 +472,7 @@ class AI(BaseAI):
                     # "moves: {}\n".format(unit.moves) +
                     # "owner: {}\n".format(unit.owner) +
                     # "path: {}\n".format(unit.path) +
-                    "ship_health: {}\n".format(unit.ship_health) +
+                    # "ship_health: {}\n".format(unit.ship_health) +
                     # "stunturns: {}\n".format(unit.stunturns) +
                     # "targetport: {}\n".format(unit.targetport) +
                     # "tile: {}\n".format(unit.tile) +
@@ -397,33 +483,18 @@ class AI(BaseAI):
     
                 if(goal is not None):
                     if(goal.execute()):
+                        print("EXECUTE: GOAL {} succeeded".format(goal))
                         self.goals[unit.id] = None
     
             self.phase += 1            
+
             return(False)
         
 
 
 
-        print("TRYING TO BUILD A CREW WITH {}/{} gold".format(self.player.gold, self.game.crew_cost))
-        if(
-            (self.player.port.tile.unit is None) and
-            (self.player.gold >= self.game.crew_cost)
-        ):
-            self.player.port.spawn("crew")
-            print("BUILDING A CREW")
-    
-        print("TRYING TO BUILD A SHIP WITH {}/{} gold".format(self.player.gold, self.game.ship_cost))
-        while(
-            (self.player.gold >= self.game.ship_cost) and
-            (self.player.port.spawn("ship"))
-        ):
-            print("BUILDING A SHIP")
-            path = self.find_path(self.player.port.tile, self.player.opponent.port.tile, self.player.port.tile.unit)
-            if(len(path) > 0):
-                print("MOVING NEW SHIP TO {}, {}".format(path[0].x, path[0].y))
-                self.player.port.tile.unit.move(path[0])
-            
+
+
         return(True)
         
 
